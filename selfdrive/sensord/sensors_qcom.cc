@@ -15,6 +15,17 @@
 #include <map>
 #include <set>
 
+#include <cutils/properties.h>
+
+#include <dlfcn.h>
+#include <string.h>
+#include <pthread.h>
+#include <errno.h>
+#include <limits.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
+
 #include "cereal/messaging/messaging.h"
 #include "selfdrive/common/swaglog.h"
 #include "selfdrive/common/timing.h"
@@ -23,26 +34,88 @@
 // ACCELEROMETER_UNCALIBRATED is only in Android O
 // https://developer.android.com/reference/android/hardware/Sensor.html#STRING_TYPE_ACCELEROMETER_UNCALIBRATED
 
-#define SENSOR_ACCELEROMETER 1
-#define SENSOR_MAGNETOMETER 2
-#define SENSOR_GYRO 4
-#define SENSOR_MAGNETOMETER_UNCALIBRATED 3
-#define SENSOR_GYRO_UNCALIBRATED 5
-#define SENSOR_PROXIMITY 6
-#define SENSOR_LIGHT 7
+#define SENSOR_ACCELEROMETER 45
+#define SENSOR_MAGNETOMETER 16
+#define SENSOR_GYRO 29
+#define SENSOR_MAGNETOMETER_UNCALIBRATED 36
+#define SENSOR_GYRO_UNCALIBRATED 22
+#define SENSOR_PROXIMITY 9
+#define SENSOR_LIGHT 40
 
 ExitHandler do_exit;
 volatile sig_atomic_t re_init_sensors = 0;
 
 namespace {
 
-void sigpipe_handler(int sig) {
-  LOGE("SIGPIPE received");
-  re_init_sensors = true;
+static int load(const char *id,
+        const char *path,
+        const struct hw_module_t **pHmi)
+{
+    int status = -EINVAL;
+    void *handle = NULL;
+    struct hw_module_t *hmi = NULL;
+
+    const char *sym = HAL_MODULE_INFO_SYM_AS_STR;
+
+    handle = dlopen(path, RTLD_NOW);
+    if (handle == NULL) {
+        char const *err_str = dlerror();
+        printf("load: module=%s\n%s\n", path, err_str?err_str:"unknown");
+        status = -EINVAL;
+        goto done;
+    }
+
+    /* Get the address of the struct hal_module_info. */
+    hmi = (struct hw_module_t *)dlsym(handle, sym);
+    if (hmi == NULL) {
+        printf("load: couldn't find symbol %s\n", sym);
+        status = -EINVAL;
+        goto done;
+    }
+
+    /* Check that the id matches */
+    if (strcmp(id, hmi->id) != 0) {
+        printf("load: id=%s != hmi->id=%s\n", id, hmi->id);
+        status = -EINVAL;
+        goto done;
+    }
+
+    hmi->dso = handle;
+
+    /* success */
+    status = 0;
+
+  done:
+    if (status != 0) {
+        hmi = NULL;
+        if (handle != NULL) {
+            dlclose(handle);
+            handle = NULL;
+        }
+    } else {
+        printf("loaded HAL id=%s path=%s hmi=%p handle=%p\n",
+                id, path, hmi, handle);
+    }
+
+    *pHmi = hmi;
+
+    return status;
 }
 
+int hw_get_module_by_class_x(const char *class_id, const char *inst,
+                           const struct hw_module_t **module)
+{
+  const char *path = "/vendor/lib64/sensors.ssc.so";
+  return load(class_id, path, module);
+}
+
+//void sigpipe_handler(int sig) {
+//  printf("SIGPIPE received");
+//  re_init_sensors = true;
+//}
+//
 void sensor_loop() {
-  LOG("*** sensor loop");
+  printf("*** sensor loop\n");
 
   uint64_t frame = 0;
   bool low_power_mode = false;
@@ -51,23 +124,30 @@ void sensor_loop() {
     SubMaster sm({"deviceState"});
     PubMaster pm({"sensorEvents"});
 
+    printf("begin to hw_get_module\n");
     struct sensors_poll_device_t* device;
     struct sensors_module_t* module;
 
-    hw_get_module(SENSORS_HARDWARE_MODULE_ID, (hw_module_t const**)&module);
+    //int ret = hw_get_module(SENSORS_HARDWARE_MODULE_ID, (hw_module_t const**)&module);
+    //int ret = hw_get_module("blueline", (hw_module_t const**)&module);
+    //int ret = hw_get_module("ssc", (hw_module_t const**)&module);
+    int ret = hw_get_module_by_class_x(SENSORS_HARDWARE_MODULE_ID, NULL, (hw_module_t const**)&module);
+    printf("hw_get_module Return Code: %d\n",ret);
+
+    printf("begin to sensors_open\n");
     sensors_open(&module->common, &device);
 
     // required
     struct sensor_t const* list;
     int count = module->get_sensors_list(module, &list);
-    LOG("%d sensors found", count);
+    printf("%d sensors found\n", count);
 
     if (getenv("SENSOR_TEST")) {
       exit(count);
     }
 
     for (int i = 0; i < count; i++) {
-      LOGD("sensor %4d: %4d %60s  %d-%ld us", i, list[i].handle, list[i].name, list[i].minDelay, list[i].maxDelay);
+      printf("sensor %4d: %4d %60s  %d-%ld us\n", i, list[i].handle, list[i].name, list[i].minDelay, list[i].maxDelay);
     }
 
     std::set<int> sensor_types = {
@@ -112,12 +192,16 @@ void sensor_loop() {
       int n = device->poll(device, buffer, numEvents);
       if (n == 0) continue;
       if (n < 0) {
-        LOG("sensor_loop poll failed: %d", n);
+        printf("sensor_loop poll failed: %d", n);
         continue;
       }
 
       int log_events = 0;
       for (int i=0; i < n; i++) {
+        //if (buffer[i].type == 35) {
+        //  continue;
+        //}
+        //printf("buffer type: %d\n", buffer[i].type);
         if (sensor_types.find(buffer[i].type) != sensor_types.end()) {
           log_events++;
         }
@@ -188,9 +272,10 @@ void sensor_loop() {
       }
 
       pm.send("sensorEvents", msg);
+      //printf("send one sensorEvents msg..\n");
 
       if (re_init_sensors) {
-        LOGE("Resetting sensors");
+        printf("Resetting sensors");
         re_init_sensors = false;
         break;
       }
@@ -219,9 +304,10 @@ void sensor_loop() {
 }// Namespace end
 
 int main(int argc, char *argv[]) {
-  setpriority(PRIO_PROCESS, 0, -18);
-  signal(SIGPIPE, (sighandler_t)sigpipe_handler);
+  //setpriority(PRIO_PROCESS, 0, -18);
+  //signal(SIGPIPE, (sighandler_t)sigpipe_handler);
 
+  printf("begin to sensor_loop...\n");
   sensor_loop();
 
   return 0;
