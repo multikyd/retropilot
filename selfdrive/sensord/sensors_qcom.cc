@@ -23,13 +23,13 @@
 // ACCELEROMETER_UNCALIBRATED is only in Android O
 // https://developer.android.com/reference/android/hardware/Sensor.html#STRING_TYPE_ACCELEROMETER_UNCALIBRATED
 
-#define SENSOR_ACCELEROMETER 1
-#define SENSOR_MAGNETOMETER 2
-#define SENSOR_GYRO 4
-#define SENSOR_MAGNETOMETER_UNCALIBRATED 3
-#define SENSOR_GYRO_UNCALIBRATED 5
-#define SENSOR_PROXIMITY 6
-#define SENSOR_LIGHT 7
+#define SENSOR_ACCELEROMETER 16
+#define SENSOR_MAGNETOMETER 14
+#define SENSOR_GYRO 10
+#define SENSOR_MAGNETOMETER_UNCALIBRATED 4
+#define SENSOR_GYRO_UNCALIBRATED 9
+#define SENSOR_PROXIMITY 1
+#define SENSOR_LIGHT 15
 
 ExitHandler do_exit;
 volatile sig_atomic_t re_init_sensors = 0;
